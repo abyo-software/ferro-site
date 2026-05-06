@@ -15,8 +15,8 @@ you've probably leaned on HyperLogLog. It's been the standard distinct-
 counting sketch since Flajolet's 2007 paper; Redis, ClickHouse, BigQuery,
 Snowflake, Elasticsearch, DuckDB, and Apache DataSketches all ship some
 flavor of it. The deal is simple: spend a couple of kilobytes of register
-state per stream and recover the cardinality of arbitrary datasets to
-within ~2% relative error.
+state per stream, feed in well-hashed inputs, and recover the cardinality
+to within ~2% relative error.
 
 In early 2024, Otmar Ertl at Dynatrace Research [published][paper] a sketch
 that reaches the same RMSE as 6-bit HyperLogLog with around 43% less
@@ -202,9 +202,10 @@ shared with the sibling register. That shared byte is the reason
 packed cannot be CAS'd safely for lock-free concurrent updates.
 
 `ExaLogLogFast` trades 3% extra memory for `u32`-aligned registers —
-one register per machine word, individually CAS-friendly, and 15-30%
-faster on the scalar insert path. If you're feeding events into a
-sketch from twenty cores at once, this is the variant you want.
+one register per machine word, individually CAS-friendly, and around
+15-30% faster on the scalar insert path (see the throughput table
+below). If you're feeding events into a sketch from twenty cores at
+once, this is the variant you want.
 
 The two share their math via a `math` module parameterized by `d`.
 The ML solver, the (α, β) coefficient computation, the per-register
@@ -215,19 +216,24 @@ have needed two patches, and divergence over time is inevitable.
 
 ## Throughput
 
-Single-threaded scalar code, criterion bench on a recent x86_64 Linux
-machine; reproducible via `cargo bench --bench insert` from the
-[repo][gh]:
+Single-threaded scalar code, criterion bench on AMD Ryzen 9 9950X,
+Linux, rustc 1.95.0 stable, `--release` (default codegen). Bench
+source: [`benches/insert.rs`][bench]. Hashes are pre-computed via
+SplitMix64 so the measurement isolates sketch work from hashing
+cost.
 
 | variant | `p = 8` | `p = 12` | `p = 16` |
 | --- | ---: | ---: | ---: |
 | `ExaLogLog` (packed) | 101 M inserts/s | 46 M inserts/s | 39 M inserts/s |
 | `ExaLogLogFast` (aligned) | 146 M inserts/s | 53 M inserts/s | 45 M inserts/s |
 
-A reference HLL implementation in the same harness hits ~100 M
+A textbook HLL in the same harness ([source][hh]) hits ~100 M
 inserts/s; ExaLogLog is in the same regime despite doing strictly
 more bookkeeping per insert. The drop as `p` grows is cache-bound:
 at `p = 16` the register array is 64 KB and falls out of L1.
+
+[bench]: https://github.com/abyo-software/exaloglog-rs/blob/main/benches/insert.rs
+[hh]: https://github.com/abyo-software/exaloglog-rs/blob/main/examples/head_to_head.rs
 
 A SIMD-accelerated batch-insert path is on the v0.2 list. The
 random-access register updates cap the win — gather/scatter is
@@ -269,8 +275,9 @@ unlocks the private-search use case.
 ExaLogLog took roughly two engineer-days end to end including the
 writeup. I don't want to overgeneralize from one data point, but
 mining the recent distributed-systems literature for papers with
-rigorous theory and a reference implementation that nobody can
-deploy in production looks like a high-yield activity right now.
+rigorous theory and reference implementations in languages other
+than the one your stack actually runs on looks like a high-yield
+activity right now.
 
 If you're already reaching for HyperLogLog, ExaLogLog is worth a
 look — especially if you're storage-constrained per-sketch. Source
