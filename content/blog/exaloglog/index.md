@@ -202,10 +202,13 @@ shared with the sibling register. That shared byte is the reason
 packed cannot be CAS'd safely for lock-free concurrent updates.
 
 `ExaLogLogFast` trades 3% extra memory for `u32`-aligned registers —
-one register per machine word, individually CAS-friendly, and around
-15-30% faster on the scalar insert path (see the throughput table
-below). If you're feeding events into a sketch from twenty cores at
-once, this is the variant you want.
+one register per machine word, individually CAS'd via
+`add_hash_atomic(&self, hash)`, and around 15-30% faster on the
+scalar insert path (see the throughput table below). If you're
+feeding events into a sketch from many cores at once, this is the
+variant you want; the registers are stored as `Box<[AtomicU32]>` so
+multiple threads can ingest into a shared sketch without external
+synchronization.
 
 The two share their math via a `math` module parameterized by `d`.
 The ML solver, the (α, β) coefficient computation, the per-register
@@ -213,6 +216,31 @@ insert rule, and the merge rule are all the same code, called with
 different `d`. It would have been easy to implement the packed
 variant by copy-pasting the aligned one, but then every bug fix would
 have needed two patches, and divergence over time is inevitable.
+
+### Sparse mode for low cardinalities
+
+The dense register array at `p = 12` takes 14 KB. If you're keeping
+sketches per-tenant and most tenants only have ten distinct items,
+that 14 KB is mostly zero registers. The packed `ExaLogLog` starts in
+**sparse mode** — a sorted list of 32-bit hash tokens (paper §4.3) —
+and auto-promotes to the dense array when distinct elements cross
+`m · 7/8`, the count at which the sparse list equals the dense array
+in size.
+
+For 100 distinct items at `p = 12`, sparse mode uses ~424 bytes vs
+the dense 14336 — about 33× smaller. Below break-even, the ML
+estimator is *exact*: the token set IS the data, no statistical
+inference involved. Above break-even the dense estimator takes over
+and storage is fixed. `ExaLogLog::new_dense(p)` skips sparse mode if
+you know `n` will be large.
+
+### Reducing precision after the fact
+
+Both variants implement `reduce(new_p)` (Algorithm 6 of the paper),
+returning a sketch at lower precision identical to one built directly
+at `new_p`. Useful for migration scenarios — you committed to too
+high a `p` for some tenants and need to compact existing sketches
+before they ship to slower storage.
 
 ## Throughput
 
@@ -235,7 +263,7 @@ at `p = 16` the register array is 64 KB and falls out of L1.
 [bench]: https://github.com/abyo-software/exaloglog-rs/blob/main/benches/insert.rs
 [hh]: https://github.com/abyo-software/exaloglog-rs/blob/main/examples/head_to_head.rs
 
-A SIMD-accelerated batch-insert path is on the v0.2 list. The
+A SIMD-accelerated batch-insert path is on the v0.3 list. The
 random-access register updates cap the win — gather/scatter is
 needed and AVX-512 is the only reasonable target — so I'd rather
 ship correct scalar code now and verify I'm not breaking accuracy
@@ -255,10 +283,11 @@ println!("distinct: {}", sketch.estimate());
 
 The API closely mirrors what you'd expect from a HyperLogLog crate.
 `add(&T)` for any `Hash` value, `add_hash(u64)` if you've already
-hashed, `merge(&other)` to union two sketches, `to_bytes()` / `from_bytes()`
-for transport. Both ML and martingale (HIP) estimators are available;
-`estimate()` defaults to ML, which is the one you want after merges
-or deserialization.
+hashed (use this with a fast hasher like xxhash3 or wyhash if hashing
+is your bottleneck), `merge(&other)` to union two sketches, and
+`to_bytes()` / `from_bytes()` for transport. Both the ML and the
+martingale (HIP) estimators are available; `estimate()` defaults to
+ML, which is the one you want after merges or deserialization.
 
 ## What I'm doing next
 
