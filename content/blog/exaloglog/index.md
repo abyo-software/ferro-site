@@ -191,8 +191,9 @@ cheap insurance and they paid out before the code shipped.
 ## Bit-for-bit parity with the Java reference
 
 For correctness validation, "the empirical RMSE matches theory" is good
-but indirect. The strongest possible test is **byte-for-byte register
-state equality with the paper's authoritative implementation**. The
+but indirect. A stronger direct test is **byte-for-byte register state
+equality with the paper's authoritative implementation** on captured
+input sequences. The
 crate ships an integration test, `tests/java_parity.rs`, that does
 exactly this: 18 fixtures captured from Dynatrace's Java reference
 ([dynatrace-research/exaloglog-paper](https://github.com/dynatrace-research/exaloglog-paper))
@@ -395,6 +396,7 @@ Other things you might reach for:
   bincode, JSON, MessagePack, CBOR, etc., all going through the same
   byte format).
 - `--features rayon` for `merge_many_par` parallel rollups.
+- `--features simd` for the x86_64 SIMD batch path described above.
 
 ## What I'm doing next
 
@@ -408,17 +410,16 @@ inside Ferro: RaBitQ and BMP feed FerroSearch's vector and learned-
 sparse paths, ExaLogLog joins FerroStream and FerroStash, ChalametPIR
 unlocks the private-search use case.
 
-The thing I'd flag is that the cost structure for "implement this
-paper in production-quality Rust" has shifted. The first end-to-end
-release of `exaloglog` took roughly two engineer-days; the next twelve
-patch releases (sparse mode, atomic insert, reduce, serde, rayon,
-counting sort, AVX-512, Newton solver, Java parity tests, Figure 8
-reproduction, batch APIs, target-RMSE constructors) took another six
-hours overnight. I don't want to overgeneralize from one data point,
-but mining the recent distributed-systems literature for papers with
-rigorous theory and reference implementations in languages other than
-the one your stack actually runs on looks like a high-yield activity
-right now.
+The surprising part to me was how compressed the follow-on work
+became. The first end-to-end release of `exaloglog` took roughly two
+engineer-days; the next twelve patch releases (sparse mode, atomic
+insert, reduce, serde, rayon, counting sort, AVX-512, Newton solver,
+Java parity tests, Figure 8 reproduction, batch APIs, target-RMSE
+constructors) added another six hours overnight. I don't want to
+overgeneralize, but mining the recent distributed-systems literature
+for papers with rigorous theory and reference implementations in
+languages other than the one your stack actually runs on looks worth
+spending more cycles on.
 
 If you're already reaching for HyperLogLog, ExaLogLog is worth a
 look — especially if you're storage-constrained per-sketch. Source
