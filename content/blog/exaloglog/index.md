@@ -55,12 +55,17 @@ tuned for around 2% RMSE at `n = 10⁶`:
 
 Two things are worth pulling out:
 
-- **In-memory state**: ExaLogLog is the smallest at this RMSE target,
-  43% under HLL-6 packed and 48% under HLL-8.
+- **In-memory state**: ExaLogLog is the smallest at this RMSE target.
+  At the configurations in Table 2 it lands at **48% under HLL-6
+  packed** (936 vs 1792) and **59% under HLL-8** (936 vs 2296). The
+  asymptotic floor is the MVP ratio: 1 − 3.67 / 6.48 ≈ 43%; specific
+  configurations land above or below depending on how `p` discretizes.
 - **Serialized state**: Compressed Probability Counting (CPC) wins
-  at 656 bytes — but pays for it with a fairly expensive variable-length
-  encoding step at serialization time. ExaLogLog still beats every
-  algorithm whose serialized form is the dense register array.
+  at 656 bytes. CPC achieves that via a specialized compression step
+  that's expensive at serialization time and rebuilds internal
+  statistics on the way out — see paper §5.2 / Apache DataSketches CPC
+  docs. ExaLogLog still beats every algorithm whose serialized form is
+  the dense register array.
 
 Asymptotically, the savings come from the memory-variance product
 (MVP) ratio: HLL-6 has MVP = 6.48, ExaLogLog at `d = 20` has MVP = 3.67.
@@ -201,7 +206,9 @@ covering `d ∈ {20, 24}`, `p ∈ {4, 8, 12}`, `n ∈ {100, 1000, 10000}`,
 all asserting that after inserting `splitmix64(0..n)` the Rust register
 array is identical to Java's `getState()`.
 
-It is. Every byte. The capture procedure is in `notes/java-parity.md`
+All 18 fixtures pass byte-for-byte (insert state) and the merge
+parity battery (8 fixtures covering `merge(a, b)` results) passes
+the same way. The capture procedure is in `notes/java-parity.md`
 and can be re-run when the Java reference bumps. The same battery
 runs the Figure 8 estimator-error reproduction — `cargo run --release
 --example paper_figure_8` reports empirical bias and RMSE across
@@ -276,10 +283,11 @@ cost.
 | `ExaLogLog` (packed) | 101 M ins/s | 46 M ins/s | 27 M ins/s |
 | `ExaLogLogFast` (aligned) | 146 M ins/s | 53 M ins/s | 33 M ins/s |
 
-A textbook HLL in the same harness ([source][hh]) hits ~100 M
-inserts/s; ExaLogLog is in the same regime despite doing strictly
-more bookkeeping per insert. The drop as `p` grows is cache-bound:
-at `p = 16` the register array is 64 KB and falls out of L1.
+A simple textbook HLL in the same harness ([source][hh], not a tuned
+production implementation) hits ~100 M inserts/s; ExaLogLog is in the
+same regime despite doing strictly more bookkeeping per insert. The
+drop as `p` grows is cache-bound: at `p = 16` the register array is
+64 KB and falls out of L1.
 
 [bench]: https://github.com/abyo-software/exaloglog-rs/blob/main/benches/insert.rs
 [hh]: https://github.com/abyo-software/exaloglog-rs/blob/main/examples/head_to_head.rs
@@ -317,7 +325,9 @@ register; concurrent calls from many threads merge cleanly. On a
 | 4 | 237 M ins/s |
 | 8 | **421 M ins/s** |
 
-Lock-free linear-ish scaling out to 8 threads. The martingale
+3.2× throughput from 1 → 8 threads — sublinear because of CAS
+contention on hot registers and L1 footprint, but enough that putting
+the sketch behind a `Mutex` would be a real loss. The martingale
 estimator is unavailable on sketches that see `add_hash_atomic`
 (per-insert bookkeeping isn't safe to share without locks); ML works
 from the register state alone and remains valid.
@@ -410,16 +420,14 @@ inside Ferro: RaBitQ and BMP feed FerroSearch's vector and learned-
 sparse paths, ExaLogLog joins FerroStream and FerroStash, ChalametPIR
 unlocks the private-search use case.
 
-The surprising part to me was how compressed the follow-on work
-became. The first end-to-end release of `exaloglog` took roughly two
-engineer-days; the next twelve patch releases (sparse mode, atomic
-insert, reduce, serde, rayon, counting sort, AVX-512, Newton solver,
-Java parity tests, Figure 8 reproduction, batch APIs, target-RMSE
-constructors) added another six hours overnight. I don't want to
-overgeneralize, but mining the recent distributed-systems literature
-for papers with rigorous theory and reference implementations in
-languages other than the one your stack actually runs on looks worth
-spending more cycles on.
+A note on scope: the throughput numbers above were captured with
+pre-hashed inputs, isolating sketch work from your hashing choice.
+Real workloads usually pay an extra ~10 ns per insert for SipHash13
+(Rust's default), or roughly half that for xxh3 — see
+`examples/fast_hashing.rs`. ExaLogLog is also not a universal
+HyperLogLog replacement: if you depend on a specific HLL wire format
+for cross-system rollups (e.g., BigQuery / Redis), this crate doesn't
+speak that yet.
 
 If you're already reaching for HyperLogLog, ExaLogLog is worth a
 look — especially if you're storage-constrained per-sketch. Source
